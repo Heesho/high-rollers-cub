@@ -10,7 +10,8 @@
   },
   "scripts": {
     "deploy": "hardhat run ./scripts/deploy.js  --network mainnet",
-    "deployBepolia": "hardhat run ./scripts/deployBepolia.js  --network mainnet"
+    "deployBepolia": "hardhat run ./scripts/deployBepolia.js  --network mainnet",
+    "deployIso": "hardhat run ./scripts/deployIso.js  --network mainnet"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-chai-matchers": "^1.0.3",
