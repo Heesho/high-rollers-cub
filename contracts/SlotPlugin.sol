@@ -10,7 +10,6 @@ import { IEntropy } from "@pythnetwork/entropy-sdk-solidity/IEntropy.sol";
 
 interface IGauge {
     function _deposit(address account, uint256 amount) external;
-    function _withdraw(address account, uint256 amount) external;
     function getReward(address account) external;
     function balanceOf(address account) external view returns (uint256);
     function totalSupply() external view returns (uint256);
@@ -55,7 +54,7 @@ contract VaultToken is ERC20, Ownable {
     }
 }
 
-contract LotteryPlugin is ReentrancyGuard, Ownable, IEntropyConsumer {
+contract SlotPlugin is ReentrancyGuard, Ownable, IEntropyConsumer {
     using SafeERC20 for IERC20;
 
     /*----------  CONSTANTS  --------------------------------------------*/
@@ -103,6 +102,7 @@ contract LotteryPlugin is ReentrancyGuard, Ownable, IEntropyConsumer {
     error Plugin__InsufficientCost();
     error Plugin__InsufficientFee();
     error Plugin__InvalidSequence();
+    error Plugin__AlreadyInitialized();
 
     /*----------  EVENTS ------------------------------------------------*/
 
@@ -114,8 +114,8 @@ contract LotteryPlugin is ReentrancyGuard, Ownable, IEntropyConsumer {
     event Plugin__DeveloperSet(address developer);
     event Plugin__IncentivesSet(address incentives);
     event Plugin__Initialized();
-    event Plugin__LotteryRequest(uint64 sequenceNumber, address player);
-    event Plugin__LotteryResult(uint64 sequenceNumber, address player, uint256 reward);
+    event Plugin__SpinRequest(uint64 sequenceNumber, address player);
+    event Plugin__SpinResult(uint64 sequenceNumber, address player, uint256 oTokenReward, uint256 tokenReward);
     event Plugin__PlayPriceSet(uint256 playPrice);
 
     /*----------  MODIFIERS  --------------------------------------------*/
@@ -152,13 +152,14 @@ contract LotteryPlugin is ReentrancyGuard, Ownable, IEntropyConsumer {
     }
 
     function claimAndDistribute() external nonReentrant {
-        uint256 balance = token.balanceOf(address(this));
-        // convert BERA to WBERA
+        uint256 balance = address(this).balance;
         if (balance > DURATION) {
             uint256 bribeAmount = balance * 40 / 100;
             uint256 incentivesAmount = balance * 40 / 100;
             uint256 developerAmount = balance * 10 / 100;
             uint256 treasuryAmount = balance - bribeAmount - incentivesAmount - developerAmount;
+
+            IWBERA(address(token)).deposit{value: balance}();
             
             token.safeTransfer(developer, developerAmount);
             token.safeTransfer(treasury, treasuryAmount);
@@ -188,25 +189,30 @@ contract LotteryPlugin is ReentrancyGuard, Ownable, IEntropyConsumer {
         if (!initialized) revert Plugin__NotInitialized();
         if (msg.value < playPrice) revert Plugin__InsufficientCost();
 
-        address entropyProvider = entropy.getDefaultProvider();
-        uint256 fee = entropy.getFee(entropyProvider);
-        if (msg.value < playPrice + fee) revert Plugin__InsufficientFee();
-
         bytes32 userRandomNumber = keccak256(abi.encodePacked(block.timestamp, block.prevrandao, msg.sender));
 
-        uint64 sequenceNumber = entropy.requestWithCallback{value: fee}(entropyProvider, userRandomNumber);
-
-        pendingPlays[sequenceNumber] = msg.sender;
+        if (address(entropy) != address(0)) {
+            address entropyProvider = entropy.getDefaultProvider();
+            uint256 fee = entropy.getFee(entropyProvider);
+            if (msg.value < playPrice + fee) revert Plugin__InsufficientFee();
+            uint64 sequenceNumber = entropy.requestWithCallback{value: fee}(entropyProvider, userRandomNumber);
+            pendingPlays[sequenceNumber] = msg.sender;
+            emit Plugin__SpinRequest(sequenceNumber, msg.sender);
+        } else {
+            mockCallback(msg.sender, userRandomNumber);
+            emit Plugin__SpinRequest(0, msg.sender);
+        }
 
         IGauge(gauge).getReward(address(this));
-        IRewardVault(rewardVault).getReward(address(this), address(this));
-        IBGT(BGT).redeem(address(this), IBGT(BGT).unboostedBalanceOf(address(this)));
-
-        emit Plugin__LotteryRequest(sequenceNumber, msg.sender);
+        uint256 bgtReward = IRewardVault(rewardVault).getReward(address(this), address(this));
+        if (bgtReward > 0) {
+            IBGT(BGT).redeem(address(this), bgtReward);
+            IWBERA(address(token)).deposit{value: bgtReward}();
+        }
     }
 
     function initialize() external {
-        if (initialized) revert Plugin__Initialized();
+        if (initialized) revert Plugin__AlreadyInitialized();
         initialized = true;
 
         IGauge(gauge)._deposit(address(this), DEPOSIT_AMOUNT);
@@ -233,26 +239,69 @@ contract LotteryPlugin is ReentrancyGuard, Ownable, IEntropyConsumer {
 
         uint256 randomValue = uint256(randomNumber) % 100;
         uint256 oTokenBalance = IERC20(OTOKEN).balanceOf(address(this));
-        uint256 reward = 0;
+        uint256 tokenBalance = IERC20(address(token)).balanceOf(address(this));
+        uint256 oTokenReward = 0;
+        uint256 tokenReward = 0;
 
         // Calculate reward based on probability
         if (randomValue < 1) {          // 1% chance
-            reward = (oTokenBalance * 30) / 100;
+            oTokenReward = (oTokenBalance * 30) / 100;
+            tokenReward = (tokenBalance * 30) / 100;
         } else if (randomValue < 3) {   // 2% chance
-            reward = (oTokenBalance * 15) / 100;
+            oTokenReward = (oTokenBalance * 15) / 100;
+            tokenReward = (tokenBalance * 15) / 100;
         } else if (randomValue < 8) {   // 5% chance
-            reward = (oTokenBalance * 5) / 100;
+            oTokenReward = (oTokenBalance * 5) / 100;
+            tokenReward = (tokenBalance * 5) / 100;
         } else if (randomValue < 50) {  // 42% chance
-            reward = (oTokenBalance * 5) / 1000; // 0.5%
+            oTokenReward = (oTokenBalance * 5) / 1000; // 0.5%
+            tokenReward = (tokenBalance * 5) / 1000; // 0.5%
         }
 
         // Transfer reward if won
-        if (reward > 0) {
-            IERC20(OTOKEN).safeTransfer(player, reward);
+        if (oTokenReward > 0) {
+            IERC20(OTOKEN).safeTransfer(player, oTokenReward);
+        }
+        if (tokenReward > 0) {
+            IERC20(address(token)).safeTransfer(player, tokenReward);
         }
 
         delete pendingPlays[sequenceNumber];
-        emit Plugin__LotteryResult(sequenceNumber, player, reward);
+        emit Plugin__SpinResult(sequenceNumber, player, oTokenReward, tokenReward);
+    }
+
+    function mockCallback(address account, bytes32 randomValue) internal {
+
+        uint256 oTokenBalance = IERC20(OTOKEN).balanceOf(address(this));
+        uint256 tokenBalance = IERC20(address(token)).balanceOf(address(this));
+        uint256 oTokenReward = 0;
+        uint256 tokenReward = 0;
+
+        // Calculate reward based on probability
+        uint256 randomNumber = uint256(randomValue) % 100;
+        if (randomNumber < 1) {          // 1% chance
+            oTokenReward = (oTokenBalance * 30) / 100;
+            tokenReward = (tokenBalance * 30) / 100;
+        } else if (randomNumber < 3) {   // 2% chance
+            oTokenReward = (oTokenBalance * 15) / 100;
+            tokenReward = (tokenBalance * 15) / 100;
+        } else if (randomNumber < 8) {   // 5% chance
+            oTokenReward = (oTokenBalance * 5) / 100;
+            tokenReward = (tokenBalance * 5) / 100;
+        } else if (randomNumber < 50) {  // 42% chance
+            oTokenReward = (oTokenBalance * 5) / 1000; // 0.5%
+            tokenReward = (tokenBalance * 5) / 1000; // 0.5%
+        }
+
+        // Transfer reward if won
+        if (oTokenReward > 0) {
+            IERC20(OTOKEN).safeTransfer(account, oTokenReward);
+        }
+        if (tokenReward > 0) {
+            IERC20(address(token)).safeTransfer(account, tokenReward);
+        }
+
+        emit Plugin__SpinResult(0, account, oTokenReward, tokenReward);
     }
 
     function setActiveBribes(bool _activeBribes) external onlyOwner {
