@@ -21,7 +21,7 @@ let plugin;
 async function getContracts() {
   plugin = await ethers.getContractAt(
     "contracts/SlotPlugin.sol:SlotPlugin",
-    "0xC24435938b08a34e3913Abbf3C3cfE51802383a9"
+    "0x36357C56644F760781647F1AC6CaEE3734A162d1"
   );
   console.log("Contracts Retrieved");
 }

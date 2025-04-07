@@ -64,6 +64,7 @@ contract SlotPlugin is ReentrancyGuard, Ownable, IEntropyConsumer {
 
     uint256 public constant DURATION = 7 days;
     uint256 public constant DEPOSIT_AMOUNT = 1 ether;
+    uint256 public constant BASIS_POINTS = 10000; // 100% = 10000
 
     address public constant BGT = 0x656b95E550C07a9ffe548bd4085c72418Ceb1dba;
 
@@ -87,11 +88,17 @@ contract SlotPlugin is ReentrancyGuard, Ownable, IEntropyConsumer {
     bool public activeBribes = true;
     bool public activeIncentives = false;
 
+    struct RewardTier {
+        uint256 threshold;     // Upper threshold for this tier (in basis points)
+        uint256 rewardPercent; // Reward percentage in basis points (1% = 100)
+    }
+
     IEntropy public entropy;
     uint256 public playPrice = 0.01 ether;
     bool public initialized = false;
 
     mapping(uint64 => address) public pendingPlays;
+    RewardTier[10] public rewardTiers;
 
     /*----------  ERRORS ------------------------------------------------*/
 
@@ -102,6 +109,7 @@ contract SlotPlugin is ReentrancyGuard, Ownable, IEntropyConsumer {
     error Plugin__InsufficientCost();
     error Plugin__InsufficientFee();
     error Plugin__InvalidSequence();
+    error Plugin__InvalidThresholds();
     error Plugin__AlreadyInitialized();
 
     /*----------  EVENTS ------------------------------------------------*/
@@ -115,8 +123,9 @@ contract SlotPlugin is ReentrancyGuard, Ownable, IEntropyConsumer {
     event Plugin__IncentivesSet(address incentives);
     event Plugin__Initialized();
     event Plugin__SpinRequest(uint64 sequenceNumber, address player);
-    event Plugin__SpinResult(uint64 sequenceNumber, address player, uint256 oTokenReward, uint256 tokenReward);
+    event Plugin__SpinResult(address indexed player, uint64 sequenceNumber, uint256 randomValue, uint256 rewardPercent, uint256 oTokenReward, uint256 tokenReward);
     event Plugin__PlayPriceSet(uint256 playPrice);
+    event Plugin__RewardTiersSet(uint256[10] thresholds, uint256[10] rewardPercents);
 
     /*----------  MODIFIERS  --------------------------------------------*/
 
@@ -149,6 +158,17 @@ contract SlotPlugin is ReentrancyGuard, Ownable, IEntropyConsumer {
         OTOKEN = IVoter(_voter).OTOKEN();
         vaultToken = address(new VaultToken());
         rewardVault = IBerachainRewardVaultFactory(_vaultFactory).createRewardVault(address(vaultToken));
+
+        rewardTiers[0] = RewardTier({threshold: 100, rewardPercent: 3000});    // 0-1%:    30% reward
+        rewardTiers[1] = RewardTier({threshold: 300, rewardPercent: 1500});    // 1-3%:    15% reward
+        rewardTiers[2] = RewardTier({threshold: 800, rewardPercent: 500});     // 3-8%:    5% reward
+        rewardTiers[3] = RewardTier({threshold: 5000, rewardPercent: 50});     // 8-50%:   0.5% reward
+        rewardTiers[4] = RewardTier({threshold: 6000, rewardPercent: 25});     // 50-60%:  0.25% reward
+        rewardTiers[5] = RewardTier({threshold: 7000, rewardPercent: 10});     // 60-70%:  0.1% reward
+        rewardTiers[6] = RewardTier({threshold: 8000, rewardPercent: 5});      // 70-80%:  0.05% reward
+        rewardTiers[7] = RewardTier({threshold: 9000, rewardPercent: 2});      // 80-90%:  0.02% reward
+        rewardTiers[8] = RewardTier({threshold: 9500, rewardPercent: 1});      // 90-95%:  0.01% reward
+        rewardTiers[9] = RewardTier({threshold: 10000, rewardPercent: 0});     // 95-100%: no reward
     }
 
     function claimAndDistribute() external nonReentrant {
@@ -237,26 +257,35 @@ contract SlotPlugin is ReentrancyGuard, Ownable, IEntropyConsumer {
         address player = pendingPlays[sequenceNumber];
         if (player == address(0)) revert Plugin__InvalidSequence();
 
-        uint256 randomValue = uint256(randomNumber) % 100;
+        uint256 randomValue = uint256(randomNumber) % BASIS_POINTS;
         uint256 oTokenBalance = IERC20(OTOKEN).balanceOf(address(this));
         uint256 tokenBalance = IERC20(address(token)).balanceOf(address(this));
-        uint256 oTokenReward = 0;
-        uint256 tokenReward = 0;
+        uint256 rewardPercent;
 
-        // Calculate reward based on probability
-        if (randomValue < 1) {          // 1% chance
-            oTokenReward = (oTokenBalance * 30) / 100;
-            tokenReward = (tokenBalance * 30) / 100;
-        } else if (randomValue < 3) {   // 2% chance
-            oTokenReward = (oTokenBalance * 15) / 100;
-            tokenReward = (tokenBalance * 15) / 100;
-        } else if (randomValue < 8) {   // 5% chance
-            oTokenReward = (oTokenBalance * 5) / 100;
-            tokenReward = (tokenBalance * 5) / 100;
-        } else if (randomValue < 50) {  // 42% chance
-            oTokenReward = (oTokenBalance * 5) / 1000; // 0.5%
-            tokenReward = (tokenBalance * 5) / 1000; // 0.5%
+        if (randomValue < rewardTiers[0].threshold) {
+            rewardPercent = rewardTiers[0].rewardPercent;
+        } else if (randomValue < rewardTiers[1].threshold) {
+            rewardPercent = rewardTiers[1].rewardPercent;
+        } else if (randomValue < rewardTiers[2].threshold) {
+            rewardPercent = rewardTiers[2].rewardPercent;
+        } else if (randomValue < rewardTiers[3].threshold) {
+            rewardPercent = rewardTiers[3].rewardPercent;
+        } else if (randomValue < rewardTiers[4].threshold) {
+            rewardPercent = rewardTiers[4].rewardPercent;
+        } else if (randomValue < rewardTiers[5].threshold) {
+            rewardPercent = rewardTiers[5].rewardPercent;
+        } else if (randomValue < rewardTiers[6].threshold) {
+            rewardPercent = rewardTiers[6].rewardPercent;
+        } else if (randomValue < rewardTiers[7].threshold) {
+            rewardPercent = rewardTiers[7].rewardPercent;
+        } else if (randomValue < rewardTiers[8].threshold) {
+            rewardPercent = rewardTiers[8].rewardPercent;
+        } else {
+            rewardPercent = rewardTiers[9].rewardPercent;
         }
+
+        uint256 oTokenReward = (oTokenBalance * rewardPercent) / BASIS_POINTS;
+        uint256 tokenReward = (tokenBalance * rewardPercent) / BASIS_POINTS;
 
         // Transfer reward if won
         if (oTokenReward > 0) {
@@ -267,31 +296,41 @@ contract SlotPlugin is ReentrancyGuard, Ownable, IEntropyConsumer {
         }
 
         delete pendingPlays[sequenceNumber];
-        emit Plugin__SpinResult(sequenceNumber, player, oTokenReward, tokenReward);
+        emit Plugin__SpinResult(player, sequenceNumber, randomValue, rewardPercent, oTokenReward, tokenReward);
     }
 
     function mockCallback(address account, bytes32 randomValue) internal {
 
+        uint256 randomNumber = uint256(randomValue) % BASIS_POINTS;
         uint256 oTokenBalance = IERC20(OTOKEN).balanceOf(address(this));
         uint256 tokenBalance = IERC20(address(token)).balanceOf(address(this));
-        uint256 oTokenReward = 0;
-        uint256 tokenReward = 0;
+        uint256 rewardPercent;
 
-        // Calculate reward based on probability
-        uint256 randomNumber = uint256(randomValue) % 100;
-        if (randomNumber < 1) {          // 1% chance
-            oTokenReward = (oTokenBalance * 30) / 100;
-            tokenReward = (tokenBalance * 30) / 100;
-        } else if (randomNumber < 3) {   // 2% chance
-            oTokenReward = (oTokenBalance * 15) / 100;
-            tokenReward = (tokenBalance * 15) / 100;
-        } else if (randomNumber < 8) {   // 5% chance
-            oTokenReward = (oTokenBalance * 5) / 100;
-            tokenReward = (tokenBalance * 5) / 100;
-        } else if (randomNumber < 50) {  // 42% chance
-            oTokenReward = (oTokenBalance * 5) / 1000; // 0.5%
-            tokenReward = (tokenBalance * 5) / 1000; // 0.5%
+        // O(1) reward calculation using if/else ladder
+        if (randomNumber < rewardTiers[0].threshold) {
+            rewardPercent = rewardTiers[0].rewardPercent;
+        } else if (randomNumber < rewardTiers[1].threshold) {
+            rewardPercent = rewardTiers[1].rewardPercent;
+        } else if (randomNumber < rewardTiers[2].threshold) {
+            rewardPercent = rewardTiers[2].rewardPercent;
+        } else if (randomNumber < rewardTiers[3].threshold) {
+            rewardPercent = rewardTiers[3].rewardPercent;
+        } else if (randomNumber < rewardTiers[4].threshold) {
+            rewardPercent = rewardTiers[4].rewardPercent;
+        } else if (randomNumber < rewardTiers[5].threshold) {
+            rewardPercent = rewardTiers[5].rewardPercent;
+        } else if (randomNumber < rewardTiers[6].threshold) {
+            rewardPercent = rewardTiers[6].rewardPercent;
+        } else if (randomNumber < rewardTiers[7].threshold) {
+            rewardPercent = rewardTiers[7].rewardPercent;
+        } else if (randomNumber < rewardTiers[8].threshold) {
+            rewardPercent = rewardTiers[8].rewardPercent;
+        } else {
+            rewardPercent = rewardTiers[9].rewardPercent;
         }
+
+        uint256 oTokenReward = (oTokenBalance * rewardPercent) / BASIS_POINTS;
+        uint256 tokenReward = (tokenBalance * rewardPercent) / BASIS_POINTS;
 
         // Transfer reward if won
         if (oTokenReward > 0) {
@@ -301,7 +340,32 @@ contract SlotPlugin is ReentrancyGuard, Ownable, IEntropyConsumer {
             IERC20(address(token)).safeTransfer(account, tokenReward);
         }
 
-        emit Plugin__SpinResult(0, account, oTokenReward, tokenReward);
+        emit Plugin__SpinResult(account, 0, randomNumber, rewardPercent, oTokenReward, tokenReward);
+    }
+
+    function setPlayPrice(uint256 _playPrice) external onlyOwner {
+        playPrice = _playPrice;
+        emit Plugin__PlayPriceSet(playPrice);
+    }
+
+    function setRewardTiers(
+        uint256[10] calldata thresholds,
+        uint256[10] calldata rewardPercents
+    ) external onlyOwner {
+        // Validate thresholds are in ascending order and last one is BASIS_POINTS
+        for (uint256 i = 1; i < 10; i++) {
+            if (thresholds[i] <= thresholds[i-1]) revert Plugin__InvalidThresholds();
+        }
+        if (thresholds[9] != BASIS_POINTS) revert Plugin__InvalidThresholds();
+
+        // Update all tiers
+        for (uint256 i = 0; i < 10; i++) {
+            rewardTiers[i] = RewardTier({
+                threshold: thresholds[i],
+                rewardPercent: rewardPercents[i]
+            });
+        }
+        emit Plugin__RewardTiersSet(thresholds, rewardPercents);
     }
 
     function setActiveBribes(bool _activeBribes) external onlyOwner {
@@ -312,11 +376,6 @@ contract SlotPlugin is ReentrancyGuard, Ownable, IEntropyConsumer {
     function setActiveIncentives(bool _activeIncentives) external onlyOwner {
         activeIncentives = _activeIncentives;
         emit Plugin__ActiveIncentivesSet(activeIncentives);
-    }
-
-    function setPlayPrice(uint256 _playPrice) external onlyOwner {
-        playPrice = _playPrice;
-        emit Plugin__PlayPriceSet(playPrice);
     }
 
     function setTreasury(address _treasury) external onlyOwner {
